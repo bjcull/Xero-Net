@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Net;
 using System.Text;
+using Serilog;
 using Xero.Api.Infrastructure.Interfaces;
 using Xero.Api.Infrastructure.RateLimiter;
 
@@ -101,13 +103,22 @@ namespace Xero.Api.Infrastructure.Http
 
         public Response Get(string endpoint, string query)
         {
+            var start = Stopwatch.GetTimestamp();
             try
             {
                 var request = CreateRequest(endpoint, "GET", query: query);
-                return new Response((HttpWebResponse)request.GetResponse());
+                var response = new Response((HttpWebResponse)request.GetResponse());
+                
+                var finish = Stopwatch.GetTimestamp();
+
+                LogHttp("GET", endpoint + query, null, (int) response.StatusCode, response.Body, start, finish);
+
+                return response;
             }
             catch (WebException we)
             {
+                LogHttpFailure("GET", endpoint + query, null, we, start);
+
 	            if (we.Response != null)
 	            {
 		            return new Response((HttpWebResponse) we.Response);
@@ -119,13 +130,22 @@ namespace Xero.Api.Infrastructure.Http
 
         public Response GetRaw(string endpoint, string mimeType, string query = null)
         {
+            var start = Stopwatch.GetTimestamp();
             try
             {
                 var request = CreateRequest(endpoint, "GET", mimeType, query);
-                return new Response((HttpWebResponse)request.GetResponse());
+                var response = new Response((HttpWebResponse)request.GetResponse());
+                
+                var finish = Stopwatch.GetTimestamp();
+
+                LogHttp("GET", endpoint + query, null, (int) response.StatusCode, response.Body, start, finish);
+
+                return response;
             }
             catch (WebException we)
             {
+                LogHttpFailure("GET", endpoint + query, null, we, start);
+
 	            if (we.Response != null)
 	            {
 		            return new Response((HttpWebResponse) we.Response);
@@ -137,20 +157,29 @@ namespace Xero.Api.Infrastructure.Http
 
         public Response Delete(string endpoint)
         {
-	        try
-	        {
-		        var request = CreateRequest(endpoint, "DELETE");
-		        return new Response((HttpWebResponse) request.GetResponse());
-	        }
-	        catch (WebException we)
-	        {
-		        if (we.Response != null)
-		        {
-			        return new Response((HttpWebResponse) we.Response);
-			}
+            var start = Stopwatch.GetTimestamp();
+            try
+            {
+                var request = CreateRequest(endpoint, "DELETE");
+                var response = new Response((HttpWebResponse) request.GetResponse());
 
-		        throw;
-	        }
+                var finish = Stopwatch.GetTimestamp();
+
+                LogHttp("DELETE", endpoint, null, (int) response.StatusCode, response.Body, start, finish);
+
+                return response;
+            }
+            catch (WebException we)
+            {
+                LogHttpFailure("DELETE", endpoint, null, we, start);
+
+                if (we.Response != null)
+                {
+                    return new Response((HttpWebResponse) we.Response);
+                }
+
+                throw;
+            }
         }
 
         private HttpWebRequest CreateRequest(string endPoint, string method, string accept = "application/json", string query = null)
@@ -252,10 +281,57 @@ namespace Xero.Api.Infrastructure.Http
 
         private Response WriteToServer(string endpoint, byte[] data, string method, string contentType = "application/xml", string query = null)
         {
-            var request = CreateRequest(endpoint, method, query: query);
-            WriteData(data, request, contentType);
+            var start = Stopwatch.GetTimestamp();
 
-            return new Response((HttpWebResponse)request.GetResponse());
-        }        
+            var request = CreateRequest(endpoint, method, query: query);
+
+            string requestBody = null;            
+            if (contentType == "application/xml" || contentType == "application/json")
+            {
+                requestBody = Encoding.UTF8.GetString(data);
+            }
+
+            WriteData(data, request, contentType);
+            var response = new Response((HttpWebResponse)request.GetResponse());
+            var finish = Stopwatch.GetTimestamp();
+
+            LogHttp(method, endpoint + query, requestBody, (int) response.StatusCode, response.Body, start, finish);
+
+            return response;
+        }       
+        
+        private void LogHttp(string requestMethod, string requestUri, string requestBody, int responseCode, string responseBody, long start, long finish)
+        {           
+            var context = Log.Logger.ForContext<HttpClient>();
+
+            if (!string.IsNullOrEmpty(requestBody))
+            {
+                context = context.ForContext("RequestBody", requestBody);
+            }
+            
+            context = context.ForContext("ResponseBody", responseBody);
+
+            var elapsed = (finish - start) * 1000 / (double)Stopwatch.Frequency;
+
+            context.Debug(MessageTemplate,
+                "Xero", requestMethod, requestUri, responseCode, elapsed);
+        }
+
+        private void LogHttpFailure(string requestMethod, string requestUri, string requestBody, WebException ex, long start)
+        {
+            var context = Log.Logger.ForContext<HttpClient>();                
+
+            if (!string.IsNullOrEmpty(requestBody))
+            {
+                context = context.ForContext("RequestBody", requestBody);
+            }
+
+            var elapsed = (Stopwatch.GetTimestamp() - start) * 1000 / (double)Stopwatch.Frequency;
+
+            context.Error(ex, MessageTemplate,
+                "Xero", requestMethod, requestUri, 0, elapsed);
+        }
+
+        const string MessageTemplate = "Dependency {Dependency} HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms";
     }
 }
